@@ -1,0 +1,14 @@
+python-dotenv
+pypdf
+python-docx
+pandas
+openpyxl
+sentence-transformers
+psycopg[binary]
+pgvector
+tqdm
+openai
+fastapi
+uvicorn
+requests
+python-dotenv

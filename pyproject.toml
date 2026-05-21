@@ -1,0 +1,2 @@
+[tool.vercel]
+entrypoint = "src.whatsapp_bot:app"
