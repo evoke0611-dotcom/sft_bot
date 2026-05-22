@@ -176,12 +176,7 @@ async def receive_whatsapp_message(request: Request):
         print(f"User number: {sender_number}")
         print(f"User question: {user_question}")
 
-        results = retrieve(user_question, top_k=5)
-
-        if not results:
-            answer = "Our call adviser will connect with you shortly."
-        else:
-            answer = generate_openai_answer(user_question, results)
+        answer = f"Bot received your message: {user_question}"
 
         next_question = extract_next_question(answer)
 
