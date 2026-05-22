@@ -3,7 +3,6 @@ pypdf
 python-docx
 pandas
 openpyxl
-sentence-transformers
 psycopg[binary]
 pgvector
 tqdm

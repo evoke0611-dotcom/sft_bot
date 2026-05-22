@@ -10,7 +10,7 @@ from src.config import DATABASE_URL, EMBEDDING_DIM
 
 class VectorStore:
     def __init__(self):
-        self.conn = psycopg.connect(DATABASE_URL)
+        self.conn = psycopg.connect(DATABASE_URL, connect_timeout=10)
         self._ensure_vector_extension()
         register_vector(self.conn)
 
@@ -20,12 +20,15 @@ class VectorStore:
 
         self.conn.commit()
 
-    def create_table(self):
+    def create_table(self, recreate: bool = False):
         """
         Creates pgvector extension and documents table.
         """
 
         with self.conn.cursor() as cur:
+            if recreate:
+                cur.execute("DROP TABLE IF EXISTS document_chunks;")
+
             cur.execute(f"""
                 CREATE TABLE IF NOT EXISTS document_chunks (
                     id BIGSERIAL PRIMARY KEY,
@@ -86,10 +89,17 @@ class VectorStore:
                         chunk_index,
                         content,
                         metadata,
-                        embedding
+                    embedding
                     )
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (chunk_id) DO NOTHING;
+                    ON CONFLICT (chunk_id) DO UPDATE SET
+                        source_file = EXCLUDED.source_file,
+                        file_type = EXCLUDED.file_type,
+                        page = EXCLUDED.page,
+                        chunk_index = EXCLUDED.chunk_index,
+                        content = EXCLUDED.content,
+                        metadata = EXCLUDED.metadata,
+                        embedding = EXCLUDED.embedding;
                 """, (
                     chunk_id,
                     metadata.get("source_file"),
