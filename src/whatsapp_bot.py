@@ -52,6 +52,7 @@ def health_check():
         "meta_api_version": META_API_VERSION
     }
 
+
 @app.get("/debug-token", tags=["Testing"])
 def debug_token():
     return {
@@ -176,7 +177,12 @@ async def receive_whatsapp_message(request: Request):
         print(f"User number: {sender_number}")
         print(f"User question: {user_question}")
 
-        answer = f"Bot received your message: {user_question}"
+        results = retrieve(user_question, top_k=5)
+
+        if not results:
+            answer = "Our call adviser will connect with you shortly."
+        else:
+            answer = generate_openai_answer(user_question, results)
 
         next_question = extract_next_question(answer)
 
