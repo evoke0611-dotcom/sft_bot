@@ -17,7 +17,7 @@ app = FastAPI(
 )
 
 
-WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN")
+WHATSAPP_VERIFY_TOKEN = (os.getenv("WHATSAPP_VERIFY_TOKEN") or "").strip()
 WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN")
 WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
 META_API_VERSION = os.getenv("META_API_VERSION", "v21.0")
@@ -50,6 +50,14 @@ def health_check():
         "whatsapp_access_token_loaded": bool(WHATSAPP_ACCESS_TOKEN),
         "whatsapp_phone_number_id_loaded": bool(WHATSAPP_PHONE_NUMBER_ID),
         "meta_api_version": META_API_VERSION
+    }
+
+@app.get("/debug-token", tags=["Testing"])
+def debug_token():
+    return {
+        "token_loaded": bool(WHATSAPP_VERIFY_TOKEN),
+        "token_length": len(WHATSAPP_VERIFY_TOKEN),
+        "expected_length_for_sft_verify": 11
     }
 
 
@@ -97,23 +105,34 @@ def query_endpoint(
 
 
 @app.get("/webhook")
-async def verify_webhook(request: Request):
+async def verify_webhook(
+    hub_mode: str = Query(None, alias="hub.mode"),
+    hub_verify_token: str = Query(None, alias="hub.verify_token"),
+    hub_challenge: str = Query(None, alias="hub.challenge")
+):
     """
     Meta webhook verification endpoint.
-    Meta sends hub.challenge.
-    We return hub.challenge only if the verify token matches.
     """
 
-    params = request.query_params
+    if not hub_mode or not hub_verify_token or not hub_challenge:
+        raise HTTPException(
+            status_code=400,
+            detail="Missing hub.mode, hub.verify_token, or hub.challenge"
+        )
 
-    mode = params.get("hub.mode")
-    token = params.get("hub.verify_token")
-    challenge = params.get("hub.challenge")
+    if hub_mode == "subscribe" and hub_verify_token.strip() == WHATSAPP_VERIFY_TOKEN:
+        return PlainTextResponse(content=hub_challenge, status_code=200)
 
-    if mode == "subscribe" and token == WHATSAPP_VERIFY_TOKEN:
-        return PlainTextResponse(content=challenge, status_code=200)
-
-    raise HTTPException(status_code=403, detail="Webhook verification failed")
+    raise HTTPException(
+        status_code=403,
+        detail={
+            "message": "Webhook verification failed",
+            "mode_received": hub_mode,
+            "token_received_length": len(hub_verify_token.strip()),
+            "env_token_loaded": bool(WHATSAPP_VERIFY_TOKEN),
+            "env_token_length": len(WHATSAPP_VERIFY_TOKEN)
+        }
+    )
 
 
 @app.post("/webhook")
