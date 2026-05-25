@@ -2,14 +2,14 @@
   "version": 2,
   "builds": [
     {
-      "src": "src/whatsapp_bot.py",
+      "src": "api/webhook.py",
       "use": "@vercel/python"
     }
   ],
   "routes": [
     {
       "src": "/(.*)",
-      "dest": "src/whatsapp_bot.py"
+      "dest": "api/webhook.py"
     }
   ]
 }
