@@ -1,2 +1,11 @@
-[tool.vercel]
-entrypoint = "src.whatsapp_bot:app"
+[project]
+name = "sft-bot"
+version = "1.0.0"
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=1.30.0",
+    "psycopg[binary]>=3.1.0",
+    "pgvector>=0.2.5",
+    "requests>=2.31.0",
+    "python-dotenv>=1.0.0",
+]
