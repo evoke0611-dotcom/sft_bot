@@ -1,5 +1,14 @@
 import hashlib
+import os
+from pathlib import Path
 from typing import List, Dict, Any
+from urllib.parse import urlsplit
+
+from dotenv import load_dotenv
+
+# Force-load root .env file before importing config
+ROOT_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(ROOT_DIR / ".env", override=True)
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -8,9 +17,51 @@ from pgvector.psycopg import register_vector
 from src.config import DATABASE_URL, EMBEDDING_DIM
 
 
+def get_database_url() -> str:
+    """
+    Always read DATABASE_URL fresh from environment.
+    This avoids stale values when FastAPI reloads.
+    """
+    database_url = os.getenv("DATABASE_URL") or DATABASE_URL
+
+    if not database_url:
+        raise RuntimeError(
+            "DATABASE_URL is missing. Please add DATABASE_URL in your root .env file."
+        )
+
+    return database_url
+
+
 class VectorStore:
     def __init__(self):
-        self.conn = psycopg.connect(DATABASE_URL, connect_timeout=10)
+        self.database_url = get_database_url()
+
+        try:
+            self.conn = psycopg.connect(self.database_url, connect_timeout=10)
+
+        except psycopg.OperationalError as exc:
+            parsed_url = urlsplit(self.database_url)
+            host = parsed_url.hostname or ""
+            username = parsed_url.username or ""
+            port = parsed_url.port
+
+            if host.endswith(".supabase.co"):
+                raise RuntimeError(
+                    "Could not connect to the Supabase direct database host. "
+                    "This host may resolve to IPv6 only on your network. "
+                    "Use the Supabase IPv4-compatible pooler connection string in DATABASE_URL."
+                ) from exc
+
+            if "pooler.supabase.com" in host:
+                raise RuntimeError(
+                    "Could not connect to Supabase pooler. "
+                    f"Detected host: {host}, port: {port}, user: {username}. "
+                    "Please confirm DATABASE_URL uses this format: "
+                    "postgresql://postgres.PROJECT_REF:PASSWORD@aws-1-ap-south-1.pooler.supabase.com:6543/postgres"
+                ) from exc
+
+            raise
+
         self._ensure_vector_extension()
         register_vector(self.conn)
 
@@ -22,7 +73,7 @@ class VectorStore:
 
     def create_table(self, recreate: bool = False):
         """
-        Creates pgvector extension and documents table.
+        Creates pgvector extension and document_chunks table.
         """
 
         with self.conn.cursor() as cur:
@@ -64,7 +115,12 @@ class VectorStore:
 
     @staticmethod
     def generate_chunk_id(content: str, metadata: Dict[str, Any]) -> str:
-        raw = f"{metadata.get('source_file')}|{metadata.get('page')}|{metadata.get('chunk_index')}|{content}"
+        raw = (
+            f"{metadata.get('source_file')}|"
+            f"{metadata.get('page')}|"
+            f"{metadata.get('chunk_index')}|"
+            f"{content}"
+        )
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     def insert_chunks(self, chunks: List[Dict[str, Any]], embeddings: List[List[float]]):
@@ -89,7 +145,7 @@ class VectorStore:
                         chunk_index,
                         content,
                         metadata,
-                    embedding
+                        embedding
                     )
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (chunk_id) DO UPDATE SET
@@ -108,7 +164,7 @@ class VectorStore:
                     metadata.get("chunk_index"),
                     content,
                     Jsonb(metadata),
-                    embedding
+                    embedding,
                 ))
 
         self.conn.commit()
@@ -130,7 +186,7 @@ class VectorStore:
             """, (
                 query_embedding,
                 query_embedding,
-                top_k
+                top_k,
             ))
 
             results = cur.fetchall()
@@ -139,10 +195,11 @@ class VectorStore:
             {
                 "content": row[0],
                 "metadata": row[1],
-                "similarity": float(row[2])
+                "similarity": float(row[2]),
             }
             for row in results
         ]
 
     def close(self):
-        self.conn.close()
+        if self.conn:
+            self.conn.close()

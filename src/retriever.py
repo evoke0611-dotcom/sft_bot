@@ -1,4 +1,11 @@
 import sys
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Force-load root .env file before importing project config or other modules
+ROOT_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(ROOT_DIR / ".env", override=True)
 
 from openai import OpenAI, OpenAIError
 
@@ -16,8 +23,11 @@ def retrieve(query: str, top_k: int = 5):
     query_embedding = embedder.embed_text(query)
 
     store = VectorStore()
-    results = store.search(query_embedding, top_k=top_k)
-    store.close()
+
+    try:
+        results = store.search(query_embedding, top_k=top_k)
+    finally:
+        store.close()
 
     return results
 
@@ -137,17 +147,18 @@ Give a short and accurate answer.
             input=[
                 {
                     "role": "system",
-                    "content": system_prompt
+                    "content": system_prompt,
                 },
                 {
                     "role": "user",
-                    "content": user_prompt
-                }
+                    "content": user_prompt,
+                },
             ],
-            temperature=0.2
+            temperature=0.2,
         )
 
         return response.output_text.strip()
+
     except OpenAIError as exc:
         return (
             f"OpenAI answer generation failed: {exc.__class__.__name__}. "

@@ -1,0 +1,1 @@
+from src.whatsapp_bot import app
