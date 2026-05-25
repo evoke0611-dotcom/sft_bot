@@ -8,11 +8,7 @@
   ],
   "routes": [
     {
-      "src": "/api/whatsapp_bot",
-      "dest": "src/whatsapp_bot.py"
-    },
-    {
-      "src": "/webhook",
+      "src": "/(.*)",
       "dest": "src/whatsapp_bot.py"
     }
   ]
