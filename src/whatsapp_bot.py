@@ -586,7 +586,7 @@ META_API_VERSION         = os.getenv("META_API_VERSION", "v21.0")
 _processed_ids: set = set()
 
 
-class handler(BaseHTTPRequestHandler):
+class handler_old(BaseHTTPRequestHandler):
 
     def log_message(self, format, *args):
         pass
