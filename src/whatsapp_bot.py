@@ -331,15 +331,240 @@
 #     return None
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# """
+# whatsapp_bot.py  —  drop-in replacement for your existing src/whatsapp_bot.py
+# Vercel serverless entry point. Replaces FastAPI with BaseHTTPRequestHandler.
+
+# Place this file at:  src/whatsapp_bot.py  (same location as before)
+
+# Vercel exposes it at:
+#   GET  /api/whatsapp_bot  →  Meta webhook verification
+#   POST /api/whatsapp_bot  →  Incoming WhatsApp messages
+# """
+
+# import os
+# import json
+# import traceback
+# import requests
+
+# from http.server import BaseHTTPRequestHandler
+# from urllib.parse import urlparse, parse_qs
+
+# from src.retriever import retrieve, generate_openai_answer
+
+
+# # ── Env vars ─────────────────────────────────────────────────────────────────
+# WHATSAPP_VERIFY_TOKEN    = (os.getenv("WHATSAPP_VERIFY_TOKEN") or "").strip()
+# WHATSAPP_ACCESS_TOKEN    = os.getenv("WHATSAPP_ACCESS_TOKEN", "")
+# WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
+# META_API_VERSION         = os.getenv("META_API_VERSION", "v21.0")
+
+# # ── In-process dedup (lives for one warm Vercel instance) ────────────────────
+# _processed_ids: set = set()
+
+
+# class handler(BaseHTTPRequestHandler):
+#     """Vercel calls this class for every request."""
+
+#     def log_message(self, format, *args):
+#         pass  # suppress default stderr noise
+
+#     # ── GET → Meta webhook verification ──────────────────────────────────────
+#     def do_GET(self):
+#         try:
+#             params    = parse_qs(urlparse(self.path).query)
+#             mode      = params.get("hub.mode",         [None])[0]
+#             token     = params.get("hub.verify_token", [None])[0]
+#             challenge = params.get("hub.challenge",    [None])[0]
+
+#             if mode == "subscribe" and token and token.strip() == WHATSAPP_VERIFY_TOKEN:
+#                 self._send(200, challenge, "text/plain")
+#             else:
+#                 print(f"Webhook verify failed. mode={mode} token={token!r}")
+#                 self._send(403, "Verification failed")
+
+#         except Exception:
+#             print(traceback.format_exc())
+#             self._send(500, "Internal error")
+
+#     # ── POST → incoming WhatsApp message ─────────────────────────────────────
+#     def do_POST(self):
+#         # Always return 200 — otherwise Meta retries the same message forever.
+#         try:
+#             length = int(self.headers.get("Content-Length", 0))
+#             body   = self.rfile.read(length) if length else b""
+#             data   = json.loads(body) if body else {}
+
+#             print("=== Incoming webhook ===")
+#             print(json.dumps(data, indent=2))
+#             print("========================")
+
+#             # Skip status-update events (delivery/read receipts — no "messages" key)
+#             entries = data.get("entry", [])
+#             if entries:
+#                 value = entries[0].get("changes", [{}])[0].get("value", {})
+#                 if "statuses" in value and "messages" not in value:
+#                     print("Status update event — skipping.")
+#                     self._send(200, "ok")
+#                     return
+
+#             msg = _extract_message(data)
+#             if not msg:
+#                 print("No user message in payload.")
+#                 self._send(200, "ok")
+#                 return
+
+#             message_id = msg["message_id"]
+#             sender     = msg["sender_number"]
+#             user_text  = msg["user_message"]
+
+#             # Dedup — avoid double replies if Meta sends same webhook twice
+#             if message_id in _processed_ids:
+#                 print(f"Duplicate {message_id} — skipping.")
+#                 self._send(200, "ok")
+#                 return
+#             _processed_ids.add(message_id)
+
+#             # Blue double-tick + stops Meta from re-queuing this event
+#             _mark_as_read(message_id)
+
+#             print(f"Sender : {sender}")
+#             print(f"Message: {user_text!r}")
+
+#             if not user_text:
+#                 _send_message(sender, "Please type your question clearly.")
+#                 self._send(200, "ok")
+#                 return
+
+#             # ── RAG pipeline ──────────────────────────────────────────────
+#             results = retrieve(user_text, top_k=5)
+#             print(f"Retrieved {len(results)} chunks from pgvector.")
+
+#             if not results:
+#                 answer = "Our call adviser will connect with you shortly."
+#             else:
+#                 answer = generate_openai_answer(user_text, results)
+
+#             print(f"Answer ({len(answer)} chars): {answer[:100]}...")
+
+#             _send_message(sender, answer[:3500])
+#             self._send(200, "ok")
+
+#         except Exception:
+#             print("POST /webhook error:")
+#             print(traceback.format_exc())
+#             self._send(200, "ok")   # still 200 so Meta does not retry
+
+#     # ── helper ───────────────────────────────────────────────────────────────
+#     def _send(self, status: int, body: str, content_type="application/json"):
+#         encoded = body.encode("utf-8")
+#         self.send_response(status)
+#         self.send_header("Content-Type", content_type)
+#         self.send_header("Content-Length", str(len(encoded)))
+#         self.end_headers()
+#         self.wfile.write(encoded)
+
+
+# # ── Pure helper functions ─────────────────────────────────────────────────────
+
+# def _extract_message(data: dict):
+#     """Pull sender, message_id and text body from a WhatsApp Cloud API payload."""
+#     try:
+#         value    = data["entry"][0]["changes"][0]["value"]
+#         messages = value.get("messages", [])
+#         if not messages:
+#             return None
+
+#         msg      = messages[0]
+#         msg_type = msg.get("type")
+
+#         if msg_type == "text":
+#             text = msg.get("text", {}).get("body", "").strip()
+#         else:
+#             print(f"Unsupported message type: {msg_type!r}")
+#             text = ""
+
+#         return {
+#             "message_id":    msg.get("id"),
+#             "sender_number": msg.get("from"),
+#             "user_message":  text,
+#         }
+
+#     except Exception:
+#         print("_extract_message error:")
+#         print(traceback.format_exc())
+#         return None
+
+
+# def _mark_as_read(message_id: str):
+#     """Send read receipt so Meta stops retrying this webhook event."""
+#     if not WHATSAPP_ACCESS_TOKEN or not WHATSAPP_PHONE_NUMBER_ID:
+#         return
+#     try:
+#         requests.post(
+#             f"https://graph.facebook.com/{META_API_VERSION}/{WHATSAPP_PHONE_NUMBER_ID}/messages",
+#             headers={
+#                 "Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}",
+#                 "Content-Type":  "application/json",
+#             },
+#             json={
+#                 "messaging_product": "whatsapp",
+#                 "status":     "read",
+#                 "message_id": message_id,
+#             },
+#             timeout=8,
+#         )
+#     except Exception:
+#         print("_mark_as_read failed (non-critical):")
+#         print(traceback.format_exc())
+
+
+# def _send_message(to: str, body: str):
+#     """Send a plain-text WhatsApp reply via Cloud API."""
+#     if not WHATSAPP_ACCESS_TOKEN:
+#         raise ValueError("WHATSAPP_ACCESS_TOKEN missing.")
+#     if not WHATSAPP_PHONE_NUMBER_ID:
+#         raise ValueError("WHATSAPP_PHONE_NUMBER_ID missing.")
+
+#     resp = requests.post(
+#         f"https://graph.facebook.com/{META_API_VERSION}/{WHATSAPP_PHONE_NUMBER_ID}/messages",
+#         headers={
+#             "Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}",
+#             "Content-Type":  "application/json",
+#         },
+#         json={
+#             "messaging_product": "whatsapp",
+#             "to":   to,
+#             "type": "text",
+#             "text": {"preview_url": False, "body": body},
+#         },
+#         timeout=20,
+#     )
+#     if resp.status_code not in (200, 201):
+#         raise ValueError(f"WhatsApp API error {resp.status_code}: {resp.text}")
+#     return resp.json()
+
+
+
+
+
 """
-whatsapp_bot.py  —  drop-in replacement for your existing src/whatsapp_bot.py
-Vercel serverless entry point. Replaces FastAPI with BaseHTTPRequestHandler.
-
-Place this file at:  src/whatsapp_bot.py  (same location as before)
-
-Vercel exposes it at:
-  GET  /api/whatsapp_bot  →  Meta webhook verification
-  POST /api/whatsapp_bot  →  Incoming WhatsApp messages
+src/whatsapp_bot.py  —  Vercel serverless handler
 """
 
 import os
@@ -353,43 +578,63 @@ from urllib.parse import urlparse, parse_qs
 from src.retriever import retrieve, generate_openai_answer
 
 
-# ── Env vars ─────────────────────────────────────────────────────────────────
 WHATSAPP_VERIFY_TOKEN    = (os.getenv("WHATSAPP_VERIFY_TOKEN") or "").strip()
 WHATSAPP_ACCESS_TOKEN    = os.getenv("WHATSAPP_ACCESS_TOKEN", "")
 WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
 META_API_VERSION         = os.getenv("META_API_VERSION", "v21.0")
 
-# ── In-process dedup (lives for one warm Vercel instance) ────────────────────
 _processed_ids: set = set()
 
 
 class handler(BaseHTTPRequestHandler):
-    """Vercel calls this class for every request."""
 
     def log_message(self, format, *args):
-        pass  # suppress default stderr noise
+        pass
 
-    # ── GET → Meta webhook verification ──────────────────────────────────────
     def do_GET(self):
         try:
-            params    = parse_qs(urlparse(self.path).query)
+            parsed  = urlparse(self.path)
+            params  = parse_qs(parsed.query)
+            path    = parsed.path
+
             mode      = params.get("hub.mode",         [None])[0]
             token     = params.get("hub.verify_token", [None])[0]
             challenge = params.get("hub.challenge",    [None])[0]
 
+            # ── Debug endpoint: visit /debug to check token values ──────────
+            if path == "/debug":
+                info = json.dumps({
+                    "env_token_loaded":  bool(WHATSAPP_VERIFY_TOKEN),
+                    "env_token_length":  len(WHATSAPP_VERIFY_TOKEN),
+                    "env_token_value":   WHATSAPP_VERIFY_TOKEN,   # visible for debugging
+                    "received_mode":     mode,
+                    "received_token":    token,
+                    "received_challenge": challenge,
+                    "full_path":         self.path,
+                }, indent=2)
+                self._send(200, info)
+                return
+
+            # ── Normal Meta verification ────────────────────────────────────
+            print(f"[VERIFY] mode={mode!r} token={token!r} env_token={WHATSAPP_VERIFY_TOKEN!r}")
+
             if mode == "subscribe" and token and token.strip() == WHATSAPP_VERIFY_TOKEN:
                 self._send(200, challenge, "text/plain")
             else:
-                print(f"Webhook verify failed. mode={mode} token={token!r}")
-                self._send(403, "Verification failed")
+                self._send(403, json.dumps({
+                    "error":            "Verification failed",
+                    "reason":           "token mismatch or missing params",
+                    "received_mode":    mode,
+                    "received_token":   token,
+                    "env_token_set":    bool(WHATSAPP_VERIFY_TOKEN),
+                    "env_token_length": len(WHATSAPP_VERIFY_TOKEN),
+                }))
 
         except Exception:
             print(traceback.format_exc())
             self._send(500, "Internal error")
 
-    # ── POST → incoming WhatsApp message ─────────────────────────────────────
     def do_POST(self):
-        # Always return 200 — otherwise Meta retries the same message forever.
         try:
             length = int(self.headers.get("Content-Length", 0))
             body   = self.rfile.read(length) if length else b""
@@ -399,12 +644,11 @@ class handler(BaseHTTPRequestHandler):
             print(json.dumps(data, indent=2))
             print("========================")
 
-            # Skip status-update events (delivery/read receipts — no "messages" key)
             entries = data.get("entry", [])
             if entries:
                 value = entries[0].get("changes", [{}])[0].get("value", {})
                 if "statuses" in value and "messages" not in value:
-                    print("Status update event — skipping.")
+                    print("Status update — skipping.")
                     self._send(200, "ok")
                     return
 
@@ -418,14 +662,12 @@ class handler(BaseHTTPRequestHandler):
             sender     = msg["sender_number"]
             user_text  = msg["user_message"]
 
-            # Dedup — avoid double replies if Meta sends same webhook twice
             if message_id in _processed_ids:
                 print(f"Duplicate {message_id} — skipping.")
                 self._send(200, "ok")
                 return
             _processed_ids.add(message_id)
 
-            # Blue double-tick + stops Meta from re-queuing this event
             _mark_as_read(message_id)
 
             print(f"Sender : {sender}")
@@ -436,7 +678,6 @@ class handler(BaseHTTPRequestHandler):
                 self._send(200, "ok")
                 return
 
-            # ── RAG pipeline ──────────────────────────────────────────────
             results = retrieve(user_text, top_k=5)
             print(f"Retrieved {len(results)} chunks from pgvector.")
 
@@ -451,11 +692,10 @@ class handler(BaseHTTPRequestHandler):
             self._send(200, "ok")
 
         except Exception:
-            print("POST /webhook error:")
+            print("POST error:")
             print(traceback.format_exc())
-            self._send(200, "ok")   # still 200 so Meta does not retry
+            self._send(200, "ok")
 
-    # ── helper ───────────────────────────────────────────────────────────────
     def _send(self, status: int, body: str, content_type="application/json"):
         encoded = body.encode("utf-8")
         self.send_response(status)
@@ -465,10 +705,7 @@ class handler(BaseHTTPRequestHandler):
         self.wfile.write(encoded)
 
 
-# ── Pure helper functions ─────────────────────────────────────────────────────
-
 def _extract_message(data: dict):
-    """Pull sender, message_id and text body from a WhatsApp Cloud API payload."""
     try:
         value    = data["entry"][0]["changes"][0]["value"]
         messages = value.get("messages", [])
@@ -489,7 +726,6 @@ def _extract_message(data: dict):
             "sender_number": msg.get("from"),
             "user_message":  text,
         }
-
     except Exception:
         print("_extract_message error:")
         print(traceback.format_exc())
@@ -497,30 +733,21 @@ def _extract_message(data: dict):
 
 
 def _mark_as_read(message_id: str):
-    """Send read receipt so Meta stops retrying this webhook event."""
     if not WHATSAPP_ACCESS_TOKEN or not WHATSAPP_PHONE_NUMBER_ID:
         return
     try:
         requests.post(
             f"https://graph.facebook.com/{META_API_VERSION}/{WHATSAPP_PHONE_NUMBER_ID}/messages",
-            headers={
-                "Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}",
-                "Content-Type":  "application/json",
-            },
-            json={
-                "messaging_product": "whatsapp",
-                "status":     "read",
-                "message_id": message_id,
-            },
+            headers={"Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}", "Content-Type": "application/json"},
+            json={"messaging_product": "whatsapp", "status": "read", "message_id": message_id},
             timeout=8,
         )
     except Exception:
-        print("_mark_as_read failed (non-critical):")
+        print("_mark_as_read failed:")
         print(traceback.format_exc())
 
 
 def _send_message(to: str, body: str):
-    """Send a plain-text WhatsApp reply via Cloud API."""
     if not WHATSAPP_ACCESS_TOKEN:
         raise ValueError("WHATSAPP_ACCESS_TOKEN missing.")
     if not WHATSAPP_PHONE_NUMBER_ID:
@@ -528,16 +755,9 @@ def _send_message(to: str, body: str):
 
     resp = requests.post(
         f"https://graph.facebook.com/{META_API_VERSION}/{WHATSAPP_PHONE_NUMBER_ID}/messages",
-        headers={
-            "Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}",
-            "Content-Type":  "application/json",
-        },
-        json={
-            "messaging_product": "whatsapp",
-            "to":   to,
-            "type": "text",
-            "text": {"preview_url": False, "body": body},
-        },
+        headers={"Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}", "Content-Type": "application/json"},
+        json={"messaging_product": "whatsapp", "to": to, "type": "text",
+              "text": {"preview_url": False, "body": body}},
         timeout=20,
     )
     if resp.status_code not in (200, 201):
