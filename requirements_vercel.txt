@@ -5,3 +5,4 @@ requests
 openai
 psycopg[binary]
 pgvector
+psycopg2-binary

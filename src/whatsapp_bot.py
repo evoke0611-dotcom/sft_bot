@@ -1,30 +1,38 @@
 # import os
 # import traceback
+# from pathlib import Path
+
 # import requests
 # from dotenv import load_dotenv
 # from fastapi import FastAPI, Request, HTTPException, Query
 # from fastapi.responses import PlainTextResponse
 
+# # Force-load root .env before importing retriever/config-related modules
+# ROOT_DIR = Path(__file__).resolve().parent.parent
+# load_dotenv(ROOT_DIR / ".env", override=True)
+
 # from src.retriever import retrieve, generate_openai_answer
 
-
-# load_dotenv(override=True)
 
 # app = FastAPI(
 #     title="SFT WhatsApp RAG Chatbot",
 #     description="WhatsApp chatbot backend with RAG and OpenAI answer generation.",
-#     version="1.0.0"
+#     version="1.0.0",
 # )
 
 
-# WHATSAPP_VERIFY_TOKEN = (os.getenv("WHATSAPP_VERIFY_TOKEN") or "").strip()
-# WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN")
-# WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
-# META_API_VERSION = os.getenv("META_API_VERSION", "v21.0")
+# def get_env(name: str, default: str = "") -> str:
+#     return (os.getenv(name, default) or "").strip()
 
 
-# # Temporary memory while server is running.
-# # Later this can be moved to PostgreSQL or Redis.
+# WHATSAPP_VERIFY_TOKEN = get_env("WHATSAPP_VERIFY_TOKEN")
+# WHATSAPP_ACCESS_TOKEN = get_env("WHATSAPP_ACCESS_TOKEN")
+# WHATSAPP_PHONE_NUMBER_ID = get_env("WHATSAPP_PHONE_NUMBER_ID")
+# META_API_VERSION = get_env("META_API_VERSION", "v21.0")
+
+
+# # Temporary memory only.
+# # On Vercel/serverless this may reset between requests.
 # user_followups = {}
 # processed_message_ids = set()
 
@@ -33,7 +41,7 @@
 # def home():
 #     return {
 #         "status": "running",
-#         "message": "SFT WhatsApp RAG chatbot is active"
+#         "message": "SFT WhatsApp RAG chatbot is active",
 #     }
 
 
@@ -46,26 +54,30 @@
 
 #     return {
 #         "status": "ok",
+#         "database_url_loaded": bool(os.getenv("DATABASE_URL")),
+#         "openai_api_key_loaded": bool(os.getenv("OPENAI_API_KEY")),
 #         "whatsapp_verify_token_loaded": bool(WHATSAPP_VERIFY_TOKEN),
 #         "whatsapp_access_token_loaded": bool(WHATSAPP_ACCESS_TOKEN),
 #         "whatsapp_phone_number_id_loaded": bool(WHATSAPP_PHONE_NUMBER_ID),
-#         "meta_api_version": META_API_VERSION
+#         "meta_api_version": META_API_VERSION,
 #     }
 
 
 # @app.get("/debug-token", tags=["Testing"])
 # def debug_token():
+#     """
+#     Debug only token loading.
+#     This does not expose the actual token.
+#     """
+
 #     return {
 #         "token_loaded": bool(WHATSAPP_VERIFY_TOKEN),
 #         "token_length": len(WHATSAPP_VERIFY_TOKEN),
-#         "expected_length_for_sft_verify": 11
 #     }
 
 
 # @app.get("/query", tags=["Testing"])
-# def query_endpoint(
-#     q: str = Query(..., description="Type your question here")
-# ):
+# def query_endpoint(q: str = Query(..., description="Type your question here")):
 #     """
 #     Test the RAG pipeline directly from Swagger UI.
 #     No WhatsApp is required for this endpoint.
@@ -99,17 +111,14 @@
 #         print("Query endpoint error:")
 #         print(traceback.format_exc())
 
-#         raise HTTPException(
-#             status_code=500,
-#             detail=str(e)
-#         )
+#         raise HTTPException(status_code=500, detail=str(e))
 
 
 # @app.get("/webhook")
 # async def verify_webhook(
 #     hub_mode: str = Query(None, alias="hub.mode"),
 #     hub_verify_token: str = Query(None, alias="hub.verify_token"),
-#     hub_challenge: str = Query(None, alias="hub.challenge")
+#     hub_challenge: str = Query(None, alias="hub.challenge"),
 # ):
 #     """
 #     Meta webhook verification endpoint.
@@ -118,7 +127,7 @@
 #     if not hub_mode or not hub_verify_token or not hub_challenge:
 #         raise HTTPException(
 #             status_code=400,
-#             detail="Missing hub.mode, hub.verify_token, or hub.challenge"
+#             detail="Missing hub.mode, hub.verify_token, or hub.challenge",
 #         )
 
 #     if hub_mode == "subscribe" and hub_verify_token.strip() == WHATSAPP_VERIFY_TOKEN:
@@ -131,8 +140,8 @@
 #             "mode_received": hub_mode,
 #             "token_received_length": len(hub_verify_token.strip()),
 #             "env_token_loaded": bool(WHATSAPP_VERIFY_TOKEN),
-#             "env_token_length": len(WHATSAPP_VERIFY_TOKEN)
-#         }
+#             "env_token_length": len(WHATSAPP_VERIFY_TOKEN),
+#         },
 #     )
 
 
@@ -154,6 +163,9 @@
 #         sender_number = message_data["sender_number"]
 #         user_message = message_data["user_message"]
 
+#         if not message_id:
+#             return {"status": "message id missing"}
+
 #         # Avoid duplicate replies if Meta sends the same webhook again.
 #         if message_id in processed_message_ids:
 #             return {"status": "duplicate message ignored"}
@@ -163,7 +175,7 @@
 #         if not user_message:
 #             send_whatsapp_message(
 #                 sender_number,
-#                 "Please type your question clearly."
+#                 "Please type your question clearly.",
 #             )
 #             return {"status": "empty message handled"}
 
@@ -189,7 +201,7 @@
 #         if next_question:
 #             user_followups[sender_number] = next_question
 
-#         # WhatsApp text message limit safety.
+#         # WhatsApp text message safety limit.
 #         answer = answer[:3500]
 
 #         send_whatsapp_message(sender_number, answer)
@@ -200,15 +212,16 @@
 #         print("Webhook error:")
 #         print(traceback.format_exc())
 
+#         # Keep 200 response so Meta does not keep retrying aggressively.
 #         return {
 #             "status": "error",
-#             "detail": str(e)
+#             "detail": str(e),
 #         }
 
 
 # def extract_message_data(data: dict):
 #     """
-#     Extracts useful data from WhatsApp webhook payload.
+#     Extract useful data from WhatsApp webhook payload.
 #     Handles normal text messages only.
 #     """
 
@@ -236,32 +249,39 @@
 #         return {
 #             "message_id": message_id,
 #             "sender_number": sender_number,
-#             "user_message": user_message
+#             "user_message": user_message,
 #         }
 
 #     except Exception:
+#         print("Message extraction error:")
+#         print(traceback.format_exc())
 #         return None
 
 
 # def send_whatsapp_message(to_number: str, message: str):
 #     """
-#     Sends a text message to a WhatsApp user using Meta Cloud API.
+#     Send a text message to a WhatsApp user using Meta Cloud API.
 #     """
 
-#     if not WHATSAPP_ACCESS_TOKEN:
-#         raise ValueError("WHATSAPP_ACCESS_TOKEN is missing in .env or Vercel environment variables.")
+#     access_token = get_env("WHATSAPP_ACCESS_TOKEN")
+#     phone_number_id = get_env("WHATSAPP_PHONE_NUMBER_ID")
+#     meta_api_version = get_env("META_API_VERSION", "v21.0")
 
-#     if not WHATSAPP_PHONE_NUMBER_ID:
-#         raise ValueError("WHATSAPP_PHONE_NUMBER_ID is missing in .env or Vercel environment variables.")
+#     if not access_token:
+#         raise ValueError(
+#             "WHATSAPP_ACCESS_TOKEN is missing in .env or Vercel environment variables."
+#         )
 
-#     url = (
-#         f"https://graph.facebook.com/{META_API_VERSION}/"
-#         f"{WHATSAPP_PHONE_NUMBER_ID}/messages"
-#     )
+#     if not phone_number_id:
+#         raise ValueError(
+#             "WHATSAPP_PHONE_NUMBER_ID is missing in .env or Vercel environment variables."
+#         )
+
+#     url = f"https://graph.facebook.com/{meta_api_version}/{phone_number_id}/messages"
 
 #     headers = {
-#         "Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}",
-#         "Content-Type": "application/json"
+#         "Authorization": f"Bearer {access_token}",
+#         "Content-Type": "application/json",
 #     }
 
 #     payload = {
@@ -270,8 +290,8 @@
 #         "type": "text",
 #         "text": {
 #             "preview_url": False,
-#             "body": message
-#         }
+#             "body": message,
+#         },
 #     }
 
 #     response = requests.post(url, headers=headers, json=payload, timeout=20)
@@ -281,14 +301,16 @@
 #         print("Status code:", response.status_code)
 #         print("Response:", response.text)
 
-#         raise ValueError(f"WhatsApp API failed with status {response.status_code}: {response.text}")
+#         raise ValueError(
+#             f"WhatsApp API failed with status {response.status_code}: {response.text}"
+#         )
 
 #     return response.json()
 
 
 # def is_yes_response(message: str) -> bool:
 #     """
-#     Checks whether the user replied yes.
+#     Check whether the user replied yes.
 #     """
 
 #     yes_words = [
@@ -304,7 +326,7 @@
 #         "ha",
 #         "hanji",
 #         "ji",
-#         "please"
+#         "please",
 #     ]
 
 #     return message.lower().strip() in yes_words
@@ -312,7 +334,7 @@
 
 # def extract_next_question(answer: str):
 #     """
-#     Extracts the follow-up question from the generated answer.
+#     Extract follow-up question from generated answer.
 #     """
 
 #     markers = [
@@ -320,7 +342,7 @@
 #         "Follow-up question:",
 #         "Need more details?",
 #         "Want to know more?",
-#         "Shall I explain further?"
+#         "Shall I explain further?",
 #     ]
 
 #     for marker in markers:
@@ -329,6 +351,7 @@
 #             return question if question else None
 
 #     return None
+
 
 import os
 import traceback
@@ -344,6 +367,12 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT_DIR / ".env", override=True)
 
 from src.retriever import retrieve, generate_openai_answer
+from src.chat_db import (
+    get_or_create_contact,
+    save_message,
+    is_human_takeover,
+    set_human_takeover,
+)
 
 
 app = FastAPI(
@@ -442,7 +471,6 @@ def query_endpoint(q: str = Query(..., description="Type your question here")):
     except Exception as e:
         print("Query endpoint error:")
         print(traceback.format_exc())
-
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -480,8 +508,9 @@ async def verify_webhook(
 @app.post("/webhook")
 async def receive_whatsapp_message(request: Request):
     """
-    Receives WhatsApp messages, sends them to the RAG pipeline,
-    generates an answer, and replies back through WhatsApp Cloud API.
+    Receives WhatsApp messages, saves chat history in database,
+    sends messages to the RAG pipeline, generates an answer,
+    and replies back through WhatsApp Cloud API.
     """
 
     try:
@@ -504,12 +533,81 @@ async def receive_whatsapp_message(request: Request):
 
         processed_message_ids.add(message_id)
 
+        # Create or get contact from database.
+        contact = get_or_create_contact(sender_number)
+
         if not user_message:
-            send_whatsapp_message(
-                sender_number,
-                "Please type your question clearly.",
+            bot_reply = "Please type your question clearly."
+
+            save_message(
+                contact_id=contact["id"],
+                phone=sender_number,
+                sender_type="user",
+                message_text="[Empty or unsupported message received]",
+                whatsapp_message_id=message_id,
+                status="received",
             )
+
+            wa_response = send_whatsapp_message(sender_number, bot_reply)
+
+            bot_message_id = None
+            try:
+                bot_message_id = wa_response.get("messages", [{}])[0].get("id")
+            except Exception:
+                bot_message_id = None
+
+            save_message(
+                contact_id=contact["id"],
+                phone=sender_number,
+                sender_type="bot",
+                message_text=bot_reply,
+                whatsapp_message_id=bot_message_id,
+                status="sent",
+            )
+
             return {"status": "empty message handled"}
+
+        # Save customer message in database.
+        save_message(
+            contact_id=contact["id"],
+            phone=sender_number,
+            sender_type="user",
+            message_text=user_message,
+            whatsapp_message_id=message_id,
+            status="received",
+        )
+
+        # If human takeover is already ON, bot will not reply automatically.
+        if is_human_takeover(sender_number):
+            return {"status": "message saved, human takeover active"}
+
+        # If user asks for human support/callback/sales/complaint, trigger handover.
+        if is_handover_request(user_message):
+            handover_reply = (
+                "Sure, I have shared your request with our team. "
+                "They will contact you shortly."
+            )
+
+            set_human_takeover(sender_number, True)
+
+            wa_response = send_whatsapp_message(sender_number, handover_reply)
+
+            bot_message_id = None
+            try:
+                bot_message_id = wa_response.get("messages", [{}])[0].get("id")
+            except Exception:
+                bot_message_id = None
+
+            save_message(
+                contact_id=contact["id"],
+                phone=sender_number,
+                sender_type="bot",
+                message_text=handover_reply,
+                whatsapp_message_id=bot_message_id,
+                status="sent",
+            )
+
+            return {"status": "human handover triggered"}
 
         user_question = user_message
 
@@ -536,7 +634,23 @@ async def receive_whatsapp_message(request: Request):
         # WhatsApp text message safety limit.
         answer = answer[:3500]
 
-        send_whatsapp_message(sender_number, answer)
+        wa_response = send_whatsapp_message(sender_number, answer)
+
+        bot_message_id = None
+        try:
+            bot_message_id = wa_response.get("messages", [{}])[0].get("id")
+        except Exception:
+            bot_message_id = None
+
+        # Save bot reply in database.
+        save_message(
+            contact_id=contact["id"],
+            phone=sender_number,
+            sender_type="bot",
+            message_text=answer,
+            whatsapp_message_id=bot_message_id,
+            status="sent",
+        )
 
         return {"status": "message processed"}
 
@@ -638,6 +752,47 @@ def send_whatsapp_message(to_number: str, message: str):
         )
 
     return response.json()
+
+
+def is_handover_request(message: str) -> bool:
+    """
+    Detect whether user wants human support, callback, sales team, or complaint handling.
+    """
+
+    if not message:
+        return False
+
+    text = message.lower().strip()
+
+    handover_keywords = [
+        "talk to human",
+        "talk to agent",
+        "connect me to team",
+        "connect me with team",
+        "connect me with support",
+        "speak with someone",
+        "i want to speak with someone",
+        "call me",
+        "please call me",
+        "need support",
+        "need help",
+        "need help from your team",
+        "human support",
+        "i want human support",
+        "please arrange callback",
+        "arrange callback",
+        "callback",
+        "contact support",
+        "customer support",
+        "support team",
+        "complaint",
+        "i have a complaint",
+        "talk to sales team",
+        "sales team",
+        "sales support",
+    ]
+
+    return any(keyword in text for keyword in handover_keywords)
 
 
 def is_yes_response(message: str) -> bool:
