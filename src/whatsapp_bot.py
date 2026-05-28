@@ -352,7 +352,6 @@
 
 #     return None
 
-
 import os
 import traceback
 from pathlib import Path
@@ -652,6 +651,12 @@ async def receive_whatsapp_message(request: Request):
             status="sent",
         )
 
+        # Safety check:
+        # If the LLM/prompt generated a handover-type reply,
+        # automatically turn human takeover ON.
+        if is_handover_reply(answer):
+            set_human_takeover(sender_number, True)
+
         return {"status": "message processed"}
 
     except Exception as e:
@@ -793,6 +798,31 @@ def is_handover_request(message: str) -> bool:
     ]
 
     return any(keyword in text for keyword in handover_keywords)
+
+
+def is_handover_reply(answer: str) -> bool:
+    """
+    Detect whether the generated bot answer itself is a handover/callback/support reply.
+    This is useful when the prompt generates the handover message instead of keyword logic.
+    """
+
+    if not answer:
+        return False
+
+    text = answer.lower().strip()
+
+    handover_reply_phrases = [
+        "i have shared your request with our team",
+        "they will contact you shortly",
+        "our team will contact you shortly",
+        "please share your name and preferred callback time",
+        "our team can guide you with accurate information",
+        "thank you. our team will contact you shortly",
+        "our call adviser will connect with you shortly",
+        "please contact our support team",
+    ]
+
+    return any(phrase in text for phrase in handover_reply_phrases)
 
 
 def is_yes_response(message: str) -> bool:
