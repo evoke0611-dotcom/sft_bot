@@ -358,8 +358,10 @@ from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request, HTTPException, Query
+from fastapi import FastAPI, Request, HTTPException, Query, Header, Depends
 from fastapi.responses import PlainTextResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 # Force-load root .env before importing retriever/config-related modules
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -371,13 +373,29 @@ from src.chat_db import (
     save_message,
     is_human_takeover,
     set_human_takeover,
+    update_lead_status,
+    get_all_contacts,
+    get_messages_by_contact,
+    get_messages_by_phone,
+    get_contact_by_phone,
 )
 
 
 app = FastAPI(
     title="SFT WhatsApp RAG Chatbot",
-    description="WhatsApp chatbot backend with RAG and OpenAI answer generation.",
+    description="WhatsApp chatbot backend with RAG, admin dashboard APIs, and WhatsApp reply handling.",
     version="1.0.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -389,12 +407,45 @@ WHATSAPP_VERIFY_TOKEN = get_env("WHATSAPP_VERIFY_TOKEN")
 WHATSAPP_ACCESS_TOKEN = get_env("WHATSAPP_ACCESS_TOKEN")
 WHATSAPP_PHONE_NUMBER_ID = get_env("WHATSAPP_PHONE_NUMBER_ID")
 META_API_VERSION = get_env("META_API_VERSION", "v21.0")
+ADMIN_API_KEY = get_env("ADMIN_API_KEY")
 
 
-# Temporary memory only.
-# On Vercel/serverless this may reset between requests.
 user_followups = {}
 processed_message_ids = set()
+
+
+class AdminSendMessageRequest(BaseModel):
+    phone: str
+    message: str
+
+
+class HumanTakeoverRequest(BaseModel):
+    takeover: bool
+
+
+class LeadStatusRequest(BaseModel):
+    lead_status: str
+
+
+def verify_admin(x_admin_key: str = Header(None)):
+    """
+    Simple admin API protection.
+    Frontend must send x-admin-key in headers.
+    """
+
+    if not ADMIN_API_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail="ADMIN_API_KEY is missing in environment variables.",
+        )
+
+    if x_admin_key != ADMIN_API_KEY:
+        raise HTTPException(
+            status_code=401,
+            detail="Unauthorized admin request.",
+        )
+
+    return True
 
 
 @app.get("/")
@@ -407,11 +458,6 @@ def home():
 
 @app.get("/health", tags=["Testing"])
 def health_check():
-    """
-    Quick environment check.
-    This does not expose secret values.
-    """
-
     return {
         "status": "ok",
         "database_url_loaded": bool(os.getenv("DATABASE_URL")),
@@ -419,17 +465,13 @@ def health_check():
         "whatsapp_verify_token_loaded": bool(WHATSAPP_VERIFY_TOKEN),
         "whatsapp_access_token_loaded": bool(WHATSAPP_ACCESS_TOKEN),
         "whatsapp_phone_number_id_loaded": bool(WHATSAPP_PHONE_NUMBER_ID),
+        "admin_api_key_loaded": bool(ADMIN_API_KEY),
         "meta_api_version": META_API_VERSION,
     }
 
 
 @app.get("/debug-token", tags=["Testing"])
 def debug_token():
-    """
-    Debug only token loading.
-    This does not expose the actual token.
-    """
-
     return {
         "token_loaded": bool(WHATSAPP_VERIFY_TOKEN),
         "token_length": len(WHATSAPP_VERIFY_TOKEN),
@@ -438,11 +480,6 @@ def debug_token():
 
 @app.get("/query", tags=["Testing"])
 def query_endpoint(q: str = Query(..., description="Type your question here")):
-    """
-    Test the RAG pipeline directly from Swagger UI.
-    No WhatsApp is required for this endpoint.
-    """
-
     try:
         results = retrieve(q, top_k=5)
 
@@ -473,16 +510,182 @@ def query_endpoint(q: str = Query(..., description="Type your question here")):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# =====================================================
+# ADMIN DASHBOARD APIs
+# =====================================================
+
+@app.get("/admin/contacts", tags=["Admin"])
+def admin_get_contacts(admin_ok: bool = Depends(verify_admin)):
+    contacts = get_all_contacts()
+
+    return {
+        "status": "success",
+        "contacts": contacts,
+    }
+
+
+@app.get("/admin/messages/{contact_id}", tags=["Admin"])
+def admin_get_messages(
+    contact_id: int,
+    admin_ok: bool = Depends(verify_admin),
+):
+    messages = get_messages_by_contact(contact_id)
+
+    return {
+        "status": "success",
+        "contact_id": contact_id,
+        "messages": messages,
+    }
+
+
+@app.get("/admin/messages-by-phone/{phone}", tags=["Admin"])
+def admin_get_messages_by_phone(
+    phone: str,
+    admin_ok: bool = Depends(verify_admin),
+):
+    messages = get_messages_by_phone(phone)
+
+    return {
+        "status": "success",
+        "phone": phone,
+        "messages": messages,
+    }
+
+
+@app.get("/admin/contact/{phone}", tags=["Admin"])
+def admin_get_contact(
+    phone: str,
+    admin_ok: bool = Depends(verify_admin),
+):
+    contact = get_contact_by_phone(phone)
+
+    if not contact:
+        raise HTTPException(
+            status_code=404,
+            detail="Contact not found.",
+        )
+
+    return {
+        "status": "success",
+        "contact": contact,
+    }
+
+
+@app.post("/admin/send-message", tags=["Admin"])
+def admin_send_message(
+    payload: AdminSendMessageRequest,
+    admin_ok: bool = Depends(verify_admin),
+):
+    """
+    Send admin reply to WhatsApp user and save it as sender_type='admin'.
+    When admin replies, bot is stopped for that user.
+    """
+
+    phone = payload.phone.strip()
+    message = payload.message.strip()
+
+    if not phone or not message:
+        raise HTTPException(
+            status_code=400,
+            detail="Phone and message are required.",
+        )
+
+    contact = get_or_create_contact(phone)
+
+    # Admin manual reply means human team is handling the chat.
+    set_human_takeover(phone, True)
+
+    wa_response = send_whatsapp_message(phone, message)
+
+    admin_message_id = None
+    try:
+        admin_message_id = wa_response.get("messages", [{}])[0].get("id")
+    except Exception:
+        admin_message_id = None
+
+    save_message(
+        contact_id=contact["id"],
+        phone=phone,
+        sender_type="admin",
+        message_text=message,
+        whatsapp_message_id=admin_message_id,
+        status="sent",
+    )
+
+    return {
+        "status": "success",
+        "message": "Admin message sent successfully.",
+        "whatsapp_message_id": admin_message_id,
+    }
+
+
+@app.patch("/admin/contact/{phone}/human-takeover", tags=["Admin"])
+def admin_update_human_takeover(
+    phone: str,
+    payload: HumanTakeoverRequest,
+    admin_ok: bool = Depends(verify_admin),
+):
+    updated_contact = set_human_takeover(phone, payload.takeover)
+
+    if not updated_contact:
+        raise HTTPException(
+            status_code=404,
+            detail="Contact not found.",
+        )
+
+    return {
+        "status": "success",
+        "contact": updated_contact,
+    }
+
+
+@app.patch("/admin/contact/{phone}/status", tags=["Admin"])
+def admin_update_lead_status(
+    phone: str,
+    payload: LeadStatusRequest,
+    admin_ok: bool = Depends(verify_admin),
+):
+    """
+    Update lead status from dashboard.
+
+    If status is Human Handover:
+    - human_takeover becomes TRUE
+
+    If status is anything else:
+    - human_takeover becomes FALSE
+    """
+
+    lead_status = payload.lead_status.strip()
+
+    if lead_status == "Human Handover":
+        set_human_takeover(phone, True)
+    else:
+        set_human_takeover(phone, False)
+
+    updated_contact = update_lead_status(phone, lead_status)
+
+    if not updated_contact:
+        raise HTTPException(
+            status_code=404,
+            detail="Contact not found.",
+        )
+
+    return {
+        "status": "success",
+        "contact": updated_contact,
+    }
+
+
+# =====================================================
+# WHATSAPP WEBHOOK
+# =====================================================
+
 @app.get("/webhook")
 async def verify_webhook(
     hub_mode: str = Query(None, alias="hub.mode"),
     hub_verify_token: str = Query(None, alias="hub.verify_token"),
     hub_challenge: str = Query(None, alias="hub.challenge"),
 ):
-    """
-    Meta webhook verification endpoint.
-    """
-
     if not hub_mode or not hub_verify_token or not hub_challenge:
         raise HTTPException(
             status_code=400,
@@ -506,12 +709,6 @@ async def verify_webhook(
 
 @app.post("/webhook")
 async def receive_whatsapp_message(request: Request):
-    """
-    Receives WhatsApp messages, saves chat history in database,
-    sends messages to the RAG pipeline, generates an answer,
-    and replies back through WhatsApp Cloud API.
-    """
-
     try:
         data = await request.json()
         message_data = extract_message_data(data)
@@ -526,13 +723,11 @@ async def receive_whatsapp_message(request: Request):
         if not message_id:
             return {"status": "message id missing"}
 
-        # Avoid duplicate replies if Meta sends the same webhook again.
         if message_id in processed_message_ids:
             return {"status": "duplicate message ignored"}
 
         processed_message_ids.add(message_id)
 
-        # Create or get contact from database.
         contact = get_or_create_contact(sender_number)
 
         if not user_message:
@@ -566,7 +761,6 @@ async def receive_whatsapp_message(request: Request):
 
             return {"status": "empty message handled"}
 
-        # Save customer message in database.
         save_message(
             contact_id=contact["id"],
             phone=sender_number,
@@ -576,11 +770,11 @@ async def receive_whatsapp_message(request: Request):
             status="received",
         )
 
-        # If human takeover is already ON, bot will not reply automatically.
+        # If human takeover is already ON, save only. Bot will not reply.
         if is_human_takeover(sender_number):
             return {"status": "message saved, human takeover active"}
 
-        # If user asks for human support/callback/sales/complaint, trigger handover.
+        # Human takeover happens ONLY when user clearly requests human/advisor/team support.
         if is_handover_request(user_message):
             handover_reply = (
                 "Sure, I have shared your request with our team. "
@@ -610,7 +804,6 @@ async def receive_whatsapp_message(request: Request):
 
         user_question = user_message
 
-        # If user replies yes, use the previous saved follow-up question.
         if is_yes_response(user_message) and sender_number in user_followups:
             user_question = user_followups[sender_number]
             del user_followups[sender_number]
@@ -630,7 +823,6 @@ async def receive_whatsapp_message(request: Request):
         if next_question:
             user_followups[sender_number] = next_question
 
-        # WhatsApp text message safety limit.
         answer = answer[:3500]
 
         wa_response = send_whatsapp_message(sender_number, answer)
@@ -641,7 +833,6 @@ async def receive_whatsapp_message(request: Request):
         except Exception:
             bot_message_id = None
 
-        # Save bot reply in database.
         save_message(
             contact_id=contact["id"],
             phone=sender_number,
@@ -651,11 +842,9 @@ async def receive_whatsapp_message(request: Request):
             status="sent",
         )
 
-        # Safety check:
-        # If the LLM/prompt generated a handover-type reply,
-        # automatically turn human takeover ON.
-        if is_handover_reply(answer):
-            set_human_takeover(sender_number, True)
+        # Important:
+        # We do NOT turn human_takeover ON just because bot answer mentions advisor/support.
+        # Handover happens only through is_handover_request(user_message).
 
         return {"status": "message processed"}
 
@@ -663,7 +852,6 @@ async def receive_whatsapp_message(request: Request):
         print("Webhook error:")
         print(traceback.format_exc())
 
-        # Keep 200 response so Meta does not keep retrying aggressively.
         return {
             "status": "error",
             "detail": str(e),
@@ -671,11 +859,6 @@ async def receive_whatsapp_message(request: Request):
 
 
 def extract_message_data(data: dict):
-    """
-    Extract useful data from WhatsApp webhook payload.
-    Handles normal text messages only.
-    """
-
     try:
         entry = data.get("entry", [])[0]
         change = entry.get("changes", [])[0]
@@ -710,10 +893,6 @@ def extract_message_data(data: dict):
 
 
 def send_whatsapp_message(to_number: str, message: str):
-    """
-    Send a text message to a WhatsApp user using Meta Cloud API.
-    """
-
     access_token = get_env("WHATSAPP_ACCESS_TOKEN")
     phone_number_id = get_env("WHATSAPP_PHONE_NUMBER_ID")
     meta_api_version = get_env("META_API_VERSION", "v21.0")
@@ -761,7 +940,8 @@ def send_whatsapp_message(to_number: str, message: str):
 
 def is_handover_request(message: str) -> bool:
     """
-    Detect whether user wants human support, callback, sales team, or complaint handling.
+    Human takeover should trigger only when the USER clearly asks
+    for advisor, adviser, human, team support, callback, sales, or complaint handling.
     """
 
     if not message:
@@ -772,15 +952,29 @@ def is_handover_request(message: str) -> bool:
     handover_keywords = [
         "talk to human",
         "talk to agent",
+        "talk to advisor",
+        "talk to adviser",
+        "connect to advisor",
+        "connect with advisor",
+        "connect me to advisor",
+        "connect me with advisor",
+        "connect to adviser",
+        "connect with adviser",
+        "connect me to adviser",
+        "connect me with adviser",
+        "i want to talk to advisor",
+        "i want to talk to adviser",
+        "i want to speak to advisor",
+        "i want to speak to adviser",
         "connect me to team",
         "connect me with team",
         "connect me with support",
+        "connect me to support",
         "speak with someone",
         "i want to speak with someone",
         "call me",
         "please call me",
         "need support",
-        "need help",
         "need help from your team",
         "human support",
         "i want human support",
@@ -800,36 +994,7 @@ def is_handover_request(message: str) -> bool:
     return any(keyword in text for keyword in handover_keywords)
 
 
-def is_handover_reply(answer: str) -> bool:
-    """
-    Detect whether the generated bot answer itself is a handover/callback/support reply.
-    This is useful when the prompt generates the handover message instead of keyword logic.
-    """
-
-    if not answer:
-        return False
-
-    text = answer.lower().strip()
-
-    handover_reply_phrases = [
-        "i have shared your request with our team",
-        "they will contact you shortly",
-        "our team will contact you shortly",
-        "please share your name and preferred callback time",
-        "our team can guide you with accurate information",
-        "thank you. our team will contact you shortly",
-        "our call adviser will connect with you shortly",
-        "please contact our support team",
-    ]
-
-    return any(phrase in text for phrase in handover_reply_phrases)
-
-
 def is_yes_response(message: str) -> bool:
-    """
-    Check whether the user replied yes.
-    """
-
     yes_words = [
         "yes",
         "y",
@@ -850,10 +1015,6 @@ def is_yes_response(message: str) -> bool:
 
 
 def extract_next_question(answer: str):
-    """
-    Extract follow-up question from generated answer.
-    """
-
     markers = [
         "Next step:",
         "Follow-up question:",
